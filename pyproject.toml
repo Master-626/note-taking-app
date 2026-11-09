@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "note-taking-app"
-version = "0.1.0"
-description = "A full-featured CLI note-taking application with Markdown support, tags, and search."
+version = "0.2.0"
+description = "A local SQLite note CLI with persisted titles and bodies, listing, and literal search."
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
@@ -17,3 +17,13 @@ notes = "note_taking.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Master-626/note-taking-app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/note_taking"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7,<9", "build>=1", "hatchling"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
