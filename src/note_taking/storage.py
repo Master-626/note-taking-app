@@ -1,16 +1,17 @@
 """Small SQLite store. A successful add returns only after its commit succeeds."""
 
-from contextlib import contextmanager
-from datetime import datetime, timezone
 import os
-from pathlib import Path
 import sqlite3
 import stat
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
 
 APPLICATION_ID = 0x4E4F5445
 SCHEMA_VERSION = 1
 _COLUMNS = [("id", "INTEGER", 0, 1), ("title", "TEXT", 1, 0),
             ("body", "TEXT", 1, 0), ("created_at", "TEXT", 1, 0)]
+_TEXT_FIELDS = ("title", "body", "created_at")
 
 
 class StorageError(Exception):
@@ -43,15 +44,48 @@ def _validate(connection):
         raise StorageError("Unexpected notes schema; no changes made.")
 
 
+def _record(row):
+    record = dict(row)
+    note_id = record.get("id")
+    for field in _TEXT_FIELDS:
+        if not isinstance(record.get(field), str):
+            raise StorageError(
+                "Note #%s has a non-text %s; no changes made." % (note_id, field)
+            )
+    return record
+
+
+def _discard_uncommitted_file(path, identity):
+    """Drop an empty file created by this process when its first commit did not finish.
+
+    A committed SQLite database is never zero bytes, so this cannot remove saved notes.
+    """
+    if identity is None:
+        return
+    try:
+        current = path.lstat()
+    except OSError:
+        return
+    if (not stat.S_ISREG(current.st_mode) or current.st_size != 0
+            or (current.st_dev, current.st_ino) != identity):
+        return
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
 @contextmanager
-def _connection(path, write=False):
+def _connection(path, write=False, create=False):
     connection = None
+    new = False
+    created_identity = None
+    committed = False
     try:
         exists = _exists(path)
-        if not exists and not write:
+        if not exists and not (write and create):
             yield None
             return
-        new = False
         if not exists:
             path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             try:
@@ -59,6 +93,8 @@ def _connection(path, write=False):
             except FileExistsError:
                 _exists(path)
             else:
+                info = os.fstat(descriptor)
+                created_identity = (info.st_dev, info.st_ino)
                 os.close(descriptor)
                 new = True
         mode = "rw" if write else "ro"
@@ -75,18 +111,21 @@ def _connection(path, write=False):
             if write:
                 connection.execute("BEGIN IMMEDIATE")
         yield connection
-        if write:
+        if write and connection is not None:
             connection.commit()
+            committed = True
     except (OSError, sqlite3.Error, ValueError) as exc:
         raise StorageError("Could not access or save notes: %s" % exc) from exc
     finally:
         if connection is not None:
             connection.close()  # An uncommitted transaction is rolled back.
+        if new and not committed:
+            _discard_uncommitted_file(path, created_identity)
 
 
 def add_note(path, title, body):
     created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    with _connection(path, write=True) as connection:
+    with _connection(path, write=True, create=True) as connection:
         cursor = connection.execute(
             "INSERT INTO notes (title, body, created_at) VALUES (?, ?, ?)",
             (title, body, created_at),
@@ -102,11 +141,32 @@ def add_note(path, title, body):
     return note_id
 
 
+def delete_note(path, note_id):
+    """Delete one note after commit. A missing database is not created."""
+    with _connection(path, write=True) as connection:
+        if connection is None:
+            raise StorageError("Note #%d does not exist." % note_id)
+        existing = connection.execute(
+            "SELECT id FROM notes WHERE id = ?", (note_id,)
+        ).fetchone()
+        if existing is None:
+            raise StorageError("Note #%d does not exist." % note_id)
+        cursor = connection.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+        remaining = connection.execute(
+            "SELECT id FROM notes WHERE id = ?", (note_id,)
+        ).fetchone()
+        # Triggers can ignore the DELETE or put the row back. Success requires
+        # the row to be gone inside this transaction, which rolls back on error.
+        if cursor.rowcount != 1 or remaining is not None:
+            raise StorageError("Note was not deleted; transaction rolled back.")
+    return note_id
+
+
 def list_notes(path, keyword=None):
     with _connection(path) as connection:
         if connection is None:
             return []
-        rows = [dict(row) for row in connection.execute(
+        rows = [_record(row) for row in connection.execute(
             "SELECT id, title, body, created_at FROM notes ORDER BY id"
         )]
     if keyword is not None:
@@ -123,4 +183,4 @@ def get_note(path, note_id):
         row = connection.execute(
             "SELECT id, title, body, created_at FROM notes WHERE id = ?", (note_id,)
         ).fetchone()
-    return dict(row) if row is not None else None
+    return _record(row) if row is not None else None

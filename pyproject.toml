@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "note-taking-app"
-version = "0.2.0"
-description = "A local SQLite note CLI with persisted titles and bodies, listing, and literal search."
+version = "0.3.0"
+description = "A local SQLite note CLI to add, list, show, search, and delete notes."
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
@@ -22,8 +22,16 @@ Homepage = "https://github.com/Master-626/note-taking-app"
 packages = ["src/note_taking"]
 
 [project.optional-dependencies]
-dev = ["pytest>=7,<9", "build>=1", "hatchling"]
+dev = ["pytest>=7,<9", "build>=1", "hatchling", "ruff>=0.6"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py38"
+line-length = 100
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]

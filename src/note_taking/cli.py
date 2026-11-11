@@ -4,12 +4,12 @@ import json
 from pathlib import Path
 
 import click
+from rich.cells import cell_len
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from . import __version__
-from . import storage
+from . import __version__, storage
 
 
 def _text(value, name, required=False):
@@ -26,6 +26,11 @@ def _call(function, *args):
         raise click.ClickException(str(exc)) from exc
 
 
+def _display_width(value):
+    lines = str(value).splitlines() or [""]
+    return max(cell_len(line) for line in lines)
+
+
 def _display(rows, as_json, empty_message):
     if as_json:
         click.echo(json.dumps(rows, ensure_ascii=False))
@@ -33,11 +38,21 @@ def _display(rows, as_json, empty_message):
         click.echo(empty_message)
     else:
         table = Table(title="Notes")
-        table.add_column("ID", style="cyan")
-        table.add_column("Title", style="green")
+        table.add_column("ID", style="cyan", overflow="fold")
+        table.add_column("Title", style="green", overflow="fold")
         for row in rows:
             table.add_row(str(row["id"]), Text(row["title"]))
-        Console().print(table)
+        console = Console()
+        # Rich ellipsizes a title that is wider than the console. On a dumb
+        # terminal, width is ignored unless height is set as well.
+        needed = (
+            max(_display_width("ID"), max(_display_width(row["id"]) for row in rows))
+            + max(_display_width("Title"), max(_display_width(row["title"]) for row in rows))
+            + 9
+        )
+        if needed > console.width:
+            console = Console(width=needed, height=max(console.height, 1000))
+        console.print(table)
 
 
 @click.group()
@@ -46,7 +61,7 @@ def _display(rows, as_json, empty_message):
               help="SQLite file. Default: notes.db in your user app-data directory.")
 @click.pass_context
 def main(ctx, database):
-    """Save, list, read, and search local notes."""
+    """Save, list, read, search, and delete local notes."""
     if database is None:
         database = str(Path(click.get_app_dir("note-taking-app", roaming=False)) / "notes.db")
     try:
@@ -99,6 +114,15 @@ def show(database, note_id, as_json):
     else:
         click.echo("#%d: %s" % (row["id"], row["title"]))
         click.echo(row["body"])
+
+
+@main.command()
+@click.argument("note_id", type=click.IntRange(1, 9223372036854775807))
+@click.pass_obj
+def delete(database, note_id):
+    """Delete one note by ID. Other notes keep their IDs."""
+    _call(storage.delete_note, database, note_id)
+    click.echo("Deleted note #%d." % note_id)
 
 
 if __name__ == "__main__":
