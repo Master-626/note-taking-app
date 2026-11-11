@@ -25,6 +25,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -m pip install ".[dev]"
+      - run: python -m ruff check .
       - run: python -m pytest -q
       - run: python -m compileall -q src scripts
       - run: python -m build

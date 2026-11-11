@@ -1,11 +1,10 @@
 """Run with a Python environment where the built wheel has been installed."""
 import json
 import os
-from pathlib import Path
 import subprocess
-import sys
 import sysconfig
 import tempfile
+from pathlib import Path
 
 with tempfile.TemporaryDirectory(prefix="notes-wheel-") as directory:
     root = Path(directory)
@@ -26,5 +25,8 @@ with tempfile.TemporaryDirectory(prefix="notes-wheel-") as directory:
     assert json.loads(run("search", "STRASSE", "--json"))[0]["body"] == "Unicode Straße\nbody"
     assert json.loads(run("show", "1", "--json"))["title"] == "实际 [red]note[/red]"
     run("show", "999", success=False)
-    assert len(json.loads(run("list", "--json"))) == 1
+    assert "Deleted note #1" in run("delete", "1")
+    assert json.loads(run("list", "--json")) == []
+    run("delete", "1", success=False)
+    assert db.is_file()
 print("Installed notes console entry point: persistent add/list/search/show passed.")

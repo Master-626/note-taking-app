@@ -1,15 +1,15 @@
 import json
 import os
-from pathlib import Path
 import sqlite3
 import subprocess
 import sys
+from pathlib import Path
 
-from click.testing import CliRunner
 import pytest
+from click.testing import CliRunner
 
-from note_taking.cli import main
 from note_taking import storage
+from note_taking.cli import main
 
 
 @pytest.fixture
@@ -55,7 +55,10 @@ def test_rich_markup_is_literal(db):
     assert "[red]literal[/red]" in run(db, "list").output
 
 
-@pytest.mark.parametrize("query", ["straße", "STRASSE", "RAẞ", "secret", "中文", "%", "_", "?", "[red]"])
+@pytest.mark.parametrize(
+    "query",
+    ["straße", "STRASSE", "RAẞ", "secret", "中文", "%", "_", "?", "[red]"],
+)
 def test_literal_unicode_search(db, query):
     run(db, "add", "Straße 中文 % _ ? [red]", "--body", "a SeCrEt body")
     run(db, "add", "Unrelated", "--body", "other text")
@@ -88,7 +91,10 @@ def test_separate_database_files_and_duplicate_titles(db, tmp_path):
 def test_failed_insert_rolls_back_and_does_not_report_success(db):
     run(db, "add", "existing")
     with sqlite3.connect(str(db)) as conn:
-        conn.execute("CREATE TRIGGER fail_insert BEFORE INSERT ON notes BEGIN SELECT RAISE(ABORT, 'write blocked'); END")
+        conn.execute(
+            "CREATE TRIGGER fail_insert BEFORE INSERT ON notes "
+            "BEGIN SELECT RAISE(ABORT, 'write blocked'); END"
+        )
     result = run(db, "add", "not saved")
     assert result.exit_code == 1
     assert "Added note" not in result.output
@@ -224,10 +230,22 @@ def test_memory_named_path_is_a_real_file(tmp_path, monkeypatch):
 
 def test_fresh_process_roundtrip_across_working_directories(db, tmp_path):
     source = Path(__file__).resolve().parents[1] / "src"
-    env = dict(os.environ, PYTHONPATH=str(source), PYTHONDONTWRITEBYTECODE="1", PYTHONIOENCODING="utf-8")
+    env = dict(
+        os.environ,
+        PYTHONPATH=str(source),
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONIOENCODING="utf-8",
+    )
+
     def call(cwd, *args):
-        result = subprocess.run([sys.executable, "-m", "note_taking.cli", "--database", str(db), *args],
-                                env=env, cwd=str(cwd), capture_output=True, encoding="utf-8", timeout=15)
+        result = subprocess.run(
+            [sys.executable, "-m", "note_taking.cli", "--database", str(db), *args],
+            env=env,
+            cwd=str(cwd),
+            capture_output=True,
+            encoding="utf-8",
+            timeout=15,
+        )
         assert result.returncode == 0, result.stderr
         return result.stdout
     other = tmp_path / "other cwd"
@@ -271,3 +289,169 @@ def test_invalid_path_is_clean_error():
     assert result.exit_code == 1
     assert "Traceback" not in result.output
     assert "Added note" not in result.output
+
+
+def test_failed_initial_save_removes_empty_file_and_retries(db, monkeypatch):
+    original = storage.sqlite3.connect
+
+    class FailingCommit(sqlite3.Connection):
+        def commit(self):
+            raise sqlite3.OperationalError("simulated commit failure")
+
+    def fail_open(*args, **kwargs):
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(storage.sqlite3, "connect", fail_open)
+    opened = run(db, "add", "not saved")
+    assert opened.exit_code == 1
+    assert "Added note" not in opened.output
+    assert not db.exists()
+    assert list(db.parent.glob(db.name + "-*")) == []
+
+    monkeypatch.setattr(
+        storage.sqlite3,
+        "connect",
+        lambda *args, **kwargs: original(*args, **dict(kwargs, factory=FailingCommit)),
+    )
+    committed = run(db, "add", "not saved", "--body", "y" * 1000)
+    assert committed.exit_code == 1
+    assert "commit failure" in committed.output
+    assert "Added note" not in committed.output
+    assert not db.exists()
+
+    monkeypatch.setattr(storage.sqlite3, "connect", original)
+    assert run(db, "add", "saved").exit_code == 0
+    assert [row["title"] for row in records(db, "list")] == ["saved"]
+    assert db.stat().st_size > 0
+
+
+def test_long_titles_stay_visible_in_list_and_search(db):
+    title = "START-" + ("中" * 40) + "-END-" + ("x" * 120)
+    assert run(db, "add", "short neighbor").exit_code == 0
+    assert run(db, "add", title, "--body", "body token").exit_code == 0
+    listed = run(db, "list")
+    assert listed.exit_code == 0, listed.output
+    assert "short neighbor" in listed.output
+    assert title in listed.output
+    assert "…" not in listed.output
+    found = run(db, "search", "body token")
+    assert found.exit_code == 0, found.output
+    assert title in found.output
+    shown = run(db, "show", "2")
+    assert title in shown.output
+
+
+def test_non_text_value_is_a_clean_error_and_can_be_deleted(db):
+    assert run(db, "add", "ok", "--body", "fine").exit_code == 0
+    with sqlite3.connect(str(db)) as conn:
+        conn.execute(
+            "INSERT INTO notes (title, body, created_at) VALUES ('bad', X'00ff', 't')"
+        )
+    before = db.read_bytes()
+    commands = [
+        ("list",),
+        ("list", "--json"),
+        ("search", "ok"),
+        ("show", "2"),
+        ("show", "2", "--json"),
+    ]
+    for args in commands:
+        result = run(db, *args)
+        assert result.exit_code == 1, (args, result.output)
+        assert "Traceback" not in result.output
+        assert "Note #2" in result.output
+        assert "non-text body" in result.output
+        assert db.read_bytes() == before
+    assert records(db, "show", "1")["body"] == "fine"
+    deleted = run(db, "delete", "2")
+    assert deleted.exit_code == 0, deleted.output
+    assert "Deleted note #2." in deleted.output
+    assert [row["title"] for row in records(db, "list")] == ["ok"]
+
+
+def test_delete_removes_one_note_without_renumbering(db):
+    assert run(db, "add", "first", "--body", "keep").exit_code == 0
+    assert run(db, "add", "second", "--body", "gone").exit_code == 0
+    assert run(db, "add", "third").exit_code == 0
+    deleted = run(db, "delete", "2")
+    assert deleted.exit_code == 0, deleted.output
+    assert deleted.output.strip() == "Deleted note #2."
+    rows = records(db, "list")
+    assert [(row["id"], row["title"], row["body"]) for row in rows] == [
+        (1, "first", "keep"),
+        (3, "third", ""),
+    ]
+    added = run(db, "add", "fourth")
+    assert "Added note #4" in added.output
+    missing = run(db, "delete", "2")
+    assert missing.exit_code == 1
+    assert "does not exist" in missing.output
+    assert "Deleted note" not in missing.output
+    assert [row["id"] for row in records(db, "list")] == [1, 3, 4]
+    assert run(db, "delete", "4").exit_code == 0
+    assert db.is_file()
+    assert [row["id"] for row in records(db, "list")] == [1, 3]
+
+
+def test_delete_missing_database_does_not_create_file(db):
+    result = run(db, "delete", "1")
+    assert result.exit_code == 1
+    assert "does not exist" in result.output
+    assert "Deleted note" not in result.output
+    assert not db.exists()
+
+
+def test_delete_commit_failure_keeps_note(db, monkeypatch):
+    assert run(db, "add", "existing").exit_code == 0
+    original = storage.sqlite3.connect
+
+    class FailingCommit(sqlite3.Connection):
+        def commit(self):
+            raise sqlite3.OperationalError("simulated commit failure")
+
+    monkeypatch.setattr(
+        storage.sqlite3,
+        "connect",
+        lambda *args, **kwargs: original(*args, **dict(kwargs, factory=FailingCommit)),
+    )
+    result = run(db, "delete", "1")
+    assert result.exit_code == 1
+    assert "Deleted note" not in result.output
+    assert "commit failure" in result.output
+    monkeypatch.setattr(storage.sqlite3, "connect", original)
+    assert [row["title"] for row in records(db, "list")] == ["existing"]
+
+
+def test_delete_blocked_by_trigger_rolls_back(db):
+    assert run(db, "add", "keep").exit_code == 0
+    with sqlite3.connect(str(db)) as conn:
+        conn.execute(
+            "CREATE TRIGGER block_delete BEFORE DELETE ON notes "
+            "BEGIN SELECT RAISE(ABORT, 'delete blocked'); END"
+        )
+    blocked = run(db, "delete", "1")
+    assert blocked.exit_code == 1
+    assert "Deleted note" not in blocked.output
+    assert [row["title"] for row in records(db, "list")] == ["keep"]
+    with sqlite3.connect(str(db)) as conn:
+        conn.execute("DROP TRIGGER block_delete")
+        conn.execute(
+            "CREATE TRIGGER restore_delete AFTER DELETE ON notes "
+            "BEGIN INSERT INTO notes (id, title, body, created_at) "
+            "VALUES (old.id, old.title, old.body, old.created_at); END"
+        )
+    restored = run(db, "delete", "1")
+    assert restored.exit_code == 1
+    assert "Deleted note" not in restored.output
+    assert "rolled back" in restored.output
+    assert [row["title"] for row in records(db, "list")] == ["keep"]
+
+
+def test_delete_preserves_invalid_database(db):
+    db.write_bytes(b"not SQLite\n")
+    before = db.read_bytes()
+    result = run(db, "delete", "1")
+    assert result.exit_code == 1
+    assert "Deleted note" not in result.output
+    assert "Traceback" not in result.output
+    assert db.read_bytes() == before
